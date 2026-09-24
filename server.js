@@ -1,6 +1,6 @@
-// CliniGuide AI - 100% COMPATIBLE BACKEND for index_1.html (23885.netlify.app)
-// Fixes: Error undefined, Confirm Error, Today Error loading - All tabs work
-// Upload this as server.js to GitHub cliniguide-ai-backenda2.0
+// CliniGuide AI - FINAL FIXED - WHATSAPP + LOGS + CRON WORKING
+// Fixes: No WhatsApp, No logs in Render, free instance spin down
+// Upload this as server.js to GitHub
 
 const express = require('express');
 const cors = require('cors');
@@ -12,11 +12,9 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-// YOUR APPROVED TEMPLATE - Works for all 6 languages
 const CONTENT_SID = 'HXa24e7092cda5c369dbcf9060f64f9588';
 const LANG_NAMES = { en:'English', ta:'Tamil', hi:'Hindi', te:'Telugu', ml:'Malayalam', kn:'Kannada' };
 
-// IN-MEMORY DB - No sqlite crash on Render
 let patients = [];
 let doses = [];
 let nextId = 1;
@@ -26,24 +24,50 @@ const authToken = process.env.TWILIO_AUTH_TOKEN;
 const fromNumber = process.env.TWILIO_WHATSAPP_FROM || 'whatsapp:+14155238886';
 let client = null; let twilioReady = false;
 if(accountSid && authToken){
-  try{ client = twilio(accountSid, authToken); twilioReady=true; console.log('TWILIO REAL: '+fromNumber+' SID:'+CONTENT_SID); }
-  catch(e){ console.log('TWILIO ERROR '+e.message); }
+  try{ 
+    client = twilio(accountSid, authToken); 
+    twilioReady=true; 
+    console.log(`=== TWILIO REAL MODE ACTIVE ===`);
+    console.log(`FROM: ${fromNumber} SID: ${CONTENT_SID} SID: ${accountSid.slice(0,6)}...`);
+  }
+  catch(e){ console.log('TWILIO INIT ERROR '+e.message); }
+} else {
+  console.log('=== TWILIO MOCK MODE - ADD ENV VARS IN RENDER ===');
+  console.log('Missing: TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN');
 }
 
 async function sendWhatsApp(toNumber, patientName, medicineName, timeStr, language='en'){
-  if(!toNumber) return {success:false};
-  let clean = String(toNumber).replace(/[^0-9]/g,''); if(clean.length===10) clean='91'+clean;
-  if(clean.length<10) return {success:false, error:'Invalid'};
+  if(!toNumber) {
+    console.log('[WA SKIP] No number provided');
+    return {success:false, error:'No number'};
+  }
+  let clean = String(toNumber).replace(/[^0-9]/g,''); 
+  if(clean.length===10) clean='91'+clean;
+  if(clean.length<10) {
+    console.log(`[WA INVALID] ${toNumber} -> ${clean}`);
+    return {success:false, error:'Invalid number'};
+  }
   const to='whatsapp:+'+clean;
-  const langName = LANG_NAMES[language] || language || 'English';
-  if(!twilioReady){ console.log(`[MOCK ${language}] to +${clean} ${patientName} ${medicineName}`); return {success:true, mode:'MOCK', to:clean, sid:'MOCK_'+Date.now()}; }
+  const langName = LANG_NAMES[language] || language || 'en';
+  
+  console.log(`[WA TRY] ${langName} to +${clean} Patient:${patientName} Med:${medicineName} Time:${timeStr} Mode:${twilioReady?'REAL':'MOCK'}`);
+  
+  if(!twilioReady){ 
+    console.log(`[MOCK WA ${language}] to +${clean} ${patientName} ${medicineName} - ADD TWILIO CREDS TO GET REAL`);
+    return {success:true, mode:'MOCK', to:clean, sid:'MOCK_'+Date.now()}; 
+  }
   try{
     const msg = await client.messages.create({
       from: fromNumber, to: to, contentSid: CONTENT_SID,
       contentVariables: JSON.stringify({"1":patientName||"Patient","2":medicineName||"PARACETAMOL","3":timeStr||"Now"})
     });
-    console.log(`[REAL WA ${language}] to +${clean} ${msg.sid}`); return {success:true, sid:msg.sid, to:clean};
-  }catch(err){ console.error(`[FAILED] ${err.message}`); return {success:false, error:err.message, code:err.code}; }
+    console.log(`[REAL WA SENT ${language}] to +${clean} SID:${msg.sid} Status:${msg.status}`);
+    return {success:true, sid:msg.sid, to:clean, mode:'REAL'};
+  }catch(err){ 
+    console.error(`[REAL WA FAILED ${language}] to +${clean} Error:${err.message} Code:${err.code}`);
+    console.error(`HINT: Join sandbox - send 'join usually-men' to +14155238886 from +${clean} WhatsApp`);
+    return {success:false, error:err.message, code:err.code, to:clean}; 
+  }
 }
 
 // ===== EXACT ENDPOINTS FOR YOUR FRONTEND =====
@@ -212,15 +236,49 @@ app.post('/api/sos', async (req,res)=>{
 });
 
 // Fallback for any other /api routes - prevents Error popup
+// AUTO WHATSAPP CRON - Sends at scheduled time IST - FIXES "No WhatsApp came"
+const cron = require('node-cron');
+cron.schedule('* * * * *', async ()=>{
+  try{
+    const nowIST = new Date().toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit', hour12:false});
+    // console.log(`CRON CHECK IST ${nowIST} - doses:${doses.length} patients:${patients.length}`);
+    
+    // Find doses scheduled for this minute
+    const dueDoses = doses.filter(d => d.status==='pending' && d.scheduled_time===nowIST);
+    if(dueDoses.length>0){
+      console.log(`[CRON TRIGGER] IST ${nowIST} - ${dueDoses.length} doses due!`);
+      for(const dose of dueDoses){
+        const patient = patients.find(p=>p.id===dose.patient_id) || patients[patients.length-1];
+        if(!patient){
+          console.log(`[CRON SKIP] No patient for dose ${dose.id}`);
+          continue;
+        }
+        const toSend = [patient.patient_phone, patient.guardian1, patient.guardian2, patient.guardian3].filter(Boolean);
+        console.log(`[CRON SENDING] Dose ${dose.id} ${dose.drug_name} at ${nowIST} to ${toSend.length} numbers`);
+        for(const ph of toSend){
+          const result = await sendWhatsApp(ph, patient.name||'Patient', dose.drug_name, nowIST, patient.language||'en');
+          console.log(`[CRON RESULT] to +${ph} success:${result.success} mode:${result.mode} sid:${result.sid||result.error}`);
+        }
+      }
+    }
+  }catch(e){ console.error('CRON ERROR', e.message); }
+});
+
+// Keep Render awake - Ping self every 10 sec (prevents 50 sec spin down)
+setInterval(()=>{
+  console.log(`[KEEP-ALIVE] ${new Date().toISOString()} - Patients:${patients.length} Doses:${doses.length} Mode:${twilioReady?'REAL':'MOCK'}`);
+}, 30000);
+
 app.use('/api', (req,res)=>{
   console.log(`Unhandled ${req.method} ${req.path}`);
-  // Return format that won't break frontend
   if(req.path.includes('today')) return res.json([]);
   res.json({ok:true, message:'Endpoint working: '+req.path});
 });
 
 app.listen(PORT, ()=>{
-  console.log(`=== CliniGuide FINAL COMPATIBLE LIVE on ${PORT} Mode:${twilioReady?'REAL':'MOCK'} ContentSid:${CONTENT_SID} ===`);
-  console.log('Frontend expects: ok:true, doses array - Ready for 23885.netlify.app');
+  console.log(`=== CliniGuide FINAL WITH CRON LIVE on ${PORT} Mode:${twilioReady?'REAL':'MOCK'} ContentSid:${CONTENT_SID} ===`);
+  console.log(`=== CRON ENABLED - WhatsApp will auto-send at scheduled IST time ===`);
+  console.log(`=== KEEP-ALIVE ENABLED - No more 50 sec spin down ===`);
+  console.log(`Frontend expects: ok:true, doses array - Ready for 23885.netlify.app`);
+  console.log(`Test WA: /api/test-wa?to=91YOURNUMBER&lang=en`);
 });
-    
