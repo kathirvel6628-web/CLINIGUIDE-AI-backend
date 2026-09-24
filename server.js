@@ -12,7 +12,10 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
+// HARDCODED CONTENT SID - FIXES undefined error from env mismatch
+// DO NOT read from process.env - directly hardcoded as you requested
 const CONTENT_SID = 'HXa24e7092cda5c369dbcf9060f64f9588';
+console.log('CONTENT_SID HARDCODED:', CONTENT_SID, 'Length:', CONTENT_SID.length);
 const LANG_NAMES = { en:'English', ta:'Tamil', hi:'Hindi', te:'Telugu', ml:'Malayalam', kn:'Kannada' };
 
 let patients = [];
@@ -56,15 +59,39 @@ async function sendWhatsApp(toNumber, patientName, medicineName, timeStr, langua
     console.log(`[MOCK WA ${language}] to +${clean} ${patientName} ${medicineName} - ADD TWILIO CREDS TO GET REAL`);
     return {success:true, mode:'MOCK', to:clean, sid:'MOCK_'+Date.now()}; 
   }
+
+  // First try with ContentSid template
   try{
+    console.log(`[WA ATTEMPT 1] Trying ContentSid ${CONTENT_SID} to +${clean}`);
     const msg = await client.messages.create({
-      from: fromNumber, to: to, contentSid: CONTENT_SID,
+      from: fromNumber, to: to, contentSid: 'HXa24e7092cda5c369dbcf9060f64f9588', // HARDCODED DIRECTLY - fixes undefined
       contentVariables: JSON.stringify({"1":patientName||"Patient","2":medicineName||"PARACETAMOL","3":timeStr||"Now"})
     });
-    console.log(`[REAL WA SENT ${language}] to +${clean} SID:${msg.sid} Status:${msg.status}`);
-    return {success:true, sid:msg.sid, to:clean, mode:'REAL'};
+    console.log(`[REAL WA SENT TEMPLATE ${language}] to +${clean} SID:${msg.sid} Status:${msg.status}`);
+    return {success:true, sid:msg.sid, to:clean, mode:'REAL-TEMPLATE'};
   }catch(err){ 
-    console.error(`[REAL WA FAILED ${language}] to +${clean} Error:${err.message} Code:${err.code}`);
+    console.error(`[WA TEMPLATE FAILED] to +${clean} Error:${err.message} Code:${err.code}`);
+    
+    // If ContentSid invalid, fallback to free-form body text (works if user joined sandbox within 24h)
+    if(err.message.includes('ContentSid') || err.code===21416 || err.code===21604 || err.code===21656){
+      console.log(`[WA ATTEMPT 2] ContentSid invalid, trying fallback plain text to +${clean}`);
+      try{
+        const fallbackBody = `CliniGuide AI Reminder [${langName}]: Hi ${patientName||'Patient'}, take ${medicineName||'PARACETAMOL'} at ${timeStr||'now'}. - Day reminder`;
+        const msg2 = await client.messages.create({
+          from: fromNumber, to: to, body: fallbackBody
+        });
+        console.log(`[REAL WA SENT FALLBACK TEXT ${language}] to +${clean} SID:${msg2.sid} Status:${msg2.status}`);
+        console.log(`[FALLBACK BODY] ${fallbackBody}`);
+        return {success:true, sid:msg2.sid, to:clean, mode:'REAL-FALLBACK-TEXT'};
+      }catch(err2){
+        console.error(`[WA FALLBACK ALSO FAILED] to +${clean} Error:${err2.message} Code:${err2.code}`);
+        console.error(`HINT 1: Make sure user joined sandbox - send 'join usually-men' to +14155238886`);
+        console.error(`HINT 2: ContentSid ${CONTENT_SID} invalid - check Twilio Console > Content Manager`);
+        console.error(`HINT 3: Env var TWILIO_CONTENT_SID in Render is truncated - copy full SID from Twilio`);
+        return {success:false, error: err2.message + ' | Template also failed: ' + err.message, code:err2.code, to:clean, templateError: err.message}; 
+      }
+    }
+    
     console.error(`HINT: Join sandbox - send 'join usually-men' to +14155238886 from +${clean} WhatsApp`);
     return {success:false, error:err.message, code:err.code, to:clean}; 
   }
@@ -74,7 +101,7 @@ async function sendWhatsApp(toNumber, patientName, medicineName, timeStr, langua
 
 // For status Connected REAL check - your frontend calls GET /
 app.get('/', (req,res)=>{
-  res.json({ status:'CliniGuide LIVE', mode: twilioReady?'REAL':'MOCK', contentSid: CONTENT_SID, message:'Backend ready for all tabs' });
+  res.json({ status:'CliniGuide LIVE', mode: twilioReady?'REAL':'MOCK', contentSid: 'HXa24e7092cda5c369dbcf9060f64f9588', // HARDCODED DIRECTLY - fixes undefined message:'Backend ready for all tabs' });
 });
 app.get('/api/health', (req,res)=>res.json({ status:'live', mode: twilioReady?'REAL':'MOCK', contentSid: CONTENT_SID }));
 
@@ -282,3 +309,4 @@ app.listen(PORT, ()=>{
   console.log(`Frontend expects: ok:true, doses array - Ready for 23885.netlify.app`);
   console.log(`Test WA: /api/test-wa?to=91YOURNUMBER&lang=en`);
 });
+  
